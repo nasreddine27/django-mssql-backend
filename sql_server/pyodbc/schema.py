@@ -65,7 +65,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
     sql_delete_index = "DROP INDEX %(name)s ON %(table)s"
     sql_delete_table = "DROP TABLE %(table)s"
     sql_rename_column = "EXEC sp_rename '%(table)s.%(old_column)s', %(new_column)s, 'COLUMN'"
-    sql_rename_table = "EXEC sp_rename %(old_table)s, %(new_table)s"
+    sql_rename_table = "EXEC sp_rename '%(old_table)s', %(new_table)s"
     sql_create_unique_null = "CREATE UNIQUE INDEX %(name)s ON %(table)s(%(columns)s) " \
                              "WHERE %(columns)s IS NOT NULL"
 
@@ -84,6 +84,10 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         if drop:
             params = []
             # SQL Server requires the name of the default constraint
+            try:
+                db_table = model._meta.db_table.split('.[')[1]
+            except:
+                db_table = model._meta.db_table
             result = self.execute(
                 self._sql_select_default_constraint_name % {
                     "table": self.quote_value(model._meta.db_table),
@@ -230,7 +234,11 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         index_names = self._db_table_constraint_names(old_db_table, index=True)
         for index_name in index_names:
             self.execute(self._db_table_delete_constraint_sql(self.sql_delete_index, old_db_table, index_name))
-
+        try:
+            new_db_table = new_db_table.split('.[')[1]
+            pass
+        except:
+            pass
         index_names = self._db_table_constraint_names(new_db_table, index=True)
         for index_name in index_names:
             self.execute(self._db_table_delete_constraint_sql(self.sql_delete_index, new_db_table, index_name))
