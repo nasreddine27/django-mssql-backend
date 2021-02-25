@@ -10,7 +10,7 @@ from django.db.models.functions import (
 from django.db.models.sql import compiler
 from django.db.transaction import TransactionManagementError
 from django.db.utils import NotSupportedError
-
+from django.db.backends.base.client import BaseDatabaseClient
 
 def _as_sql_agv(self, compiler, connection):
     return self.as_sql(compiler, connection, template='%(function)s(CONVERT(float, %(field)s))')
@@ -176,7 +176,6 @@ class SQLCompiler(compiler.SQLCompiler):
             # SQL Server 2012 or newer supports OFFSET/FETCH clause
             supports_offset_clause = self.connection.sql_server_version >= 2012
             do_offset_emulation = do_offset and not supports_offset_clause
-
             if combinator:
                 if not getattr(features, 'supports_select_{}'.format(combinator)):
                     raise NotSupportedError('{} is not supported on this database backend.'.format(combinator))
@@ -190,7 +189,6 @@ class SQLCompiler(compiler.SQLCompiler):
                 having, h_params = self.compile(self.having) if self.having is not None else ("", [])
                 params = []
                 result = ['SELECT']
-
                 if self.query.distinct:
                     distinct_result, distinct_params = self.connection.ops.distinct_sql(
                         distinct_fields,
@@ -198,7 +196,6 @@ class SQLCompiler(compiler.SQLCompiler):
                     )
                     result += distinct_result
                     params += distinct_params
-
                 # SQL Server requires the keword for limitting at the begenning
                 if do_limit and not do_offset:
                     result.append('TOP %d' % high_mark)
@@ -213,12 +210,18 @@ class SQLCompiler(compiler.SQLCompiler):
                         col_idx += 1
                     params.extend(s_params)
                     out_cols.append(s_sql)
-
                 # SQL Server requires an order-by clause for offsetting
                 if do_offset:
                     meta = self.query.get_meta()
                     qn = self.quote_name_unless_alias
-                    offsetting_order_by = '%s.%s' % (qn(meta.db_table), qn(meta.pk.db_column or meta.pk.column))
+                    settings_dict = self.connection.settings_dict
+                    if '.[' in meta.db_table:
+                        table = qn(meta.db_table)
+                        pass
+                    else:
+                        schemas = settings_dict['SCHEMAS']
+                        table = schemas + "].[" + qn(meta.db_table)
+                    offsetting_order_by = '%s.%s' % (table, qn(meta.pk.db_column or meta.pk.column))
                     if do_offset_emulation:
                         if order_by:
                             ordering = []
@@ -239,7 +242,6 @@ class SQLCompiler(compiler.SQLCompiler):
                         out_cols.append('ROW_NUMBER() OVER (ORDER BY %s) AS [rn]' % offsetting_order_by)
                     elif not order_by:
                         order_by.append(((None, ('%s ASC' % offsetting_order_by, [], None))))
-
                 if self.query.select_for_update and self.connection.features.has_select_for_update:
                     if self.connection.get_autocommit():
                         raise TransactionManagementError('select_for_update cannot be used outside of a transaction.')
@@ -266,13 +268,10 @@ class SQLCompiler(compiler.SQLCompiler):
                         skip_locked=skip_locked,
                         of=self.get_select_for_update_of_arguments(),
                     )
-
                 if for_update_part and self.connection.features.for_update_after_from:
                     from_.insert(1, for_update_part)
-
-                result += [', '.join(out_cols), 'FROM', *from_]
+                result += [', '.join(out_cols), 'FROM', *from_,]
                 params.extend(f_params)
-
                 if where:
                     result.append('WHERE %s' % where)
                     params.extend(w_params)
@@ -296,7 +295,6 @@ class SQLCompiler(compiler.SQLCompiler):
                     self.query.explain_format,
                     **self.query.explain_options
                 ))
-
             if order_by:
                 ordering = []
                 for _, (o_sql, o_params, _) in order_by:
@@ -320,7 +318,6 @@ class SQLCompiler(compiler.SQLCompiler):
                         result.append('ORDER BY X.rn')
                 else:
                     result.append(self.connection.ops.limit_offset_sql(self.query.low_mark, self.query.high_mark))
-
             if self.query.subquery and extra_select:
                 # If the query is used as a subquery, the extra selects would
                 # result in more columns than the left-hand side expression is
@@ -347,12 +344,61 @@ class SQLCompiler(compiler.SQLCompiler):
                     ', '.join(sub_selects),
                     ' '.join(result),
                 ), tuple(sub_params + params)
-
             return ' '.join(result), tuple(params)
         finally:
             # Finally do cleanup - get rid of the joins we created above.
             self.query.reset_refcounts(refcounts_before)
+    def get_from_clause(self):
+        """
+        Return a list of strings that are joined together to go after the
+        "FROM" part of the query, as well as a list any extra parameters that
+        need to be included. Subclasses, can override this to create a
+        from-clause via a "select".
 
+        This should only be called after any SQL construction methods that
+        might change the tables that are needed. This means the select columns,
+        ordering, and distinct must be done first.
+        """
+        result = []
+        params = []
+        settings_dict = self.connection.settings_dict
+        for alias in tuple(self.query.alias_map):
+            if not self.query.alias_refcount[alias]:
+                continue
+            try:
+                from_clause = self.query.alias_map[alias]
+            except KeyError:
+                # Extra tables can end up in self.tables, but not in the
+                # alias_map if they aren't in a join. That's OK. We skip them.
+                continue
+            clause_sql, clause_params = self.compile(from_clause)
+            try:
+                table_clause_sql = clause_sql.split('JOIN ')[1].split(' ON')[0]
+                if '.[' in table_clause_sql:
+                    table_clause_sql = table_clause_sql
+                    pass
+                else:
+                    schemas = settings_dict['SCHEMAS']
+                    table_clause_sql= '[' + schemas + "]." + table_clause_sql
+                clause_sql = clause_sql.split('JOIN')[0] + 'JOIN ' + table_clause_sql + ' ON' + clause_sql.split('JOIN')[1].split('ON')[1]
+            except:
+                pass
+            if '.[' in clause_sql:
+                table = clause_sql
+                pass
+            else:
+                schemas = settings_dict['SCHEMAS']
+                clause_sql= '[' + schemas + "]." + clause_sql
+            result.append(clause_sql)
+            params.extend(clause_params)
+        for t in self.query.extra_tables:
+            alias, _ = self.query.table_alias(t)
+            # Only add the alias if it's not already present (the table_alias()
+            # call increments the refcount, so an alias refcount of one means
+            # this is the only reference).
+            if alias not in self.query.alias_map or self.query.alias_refcount[alias] == 1:
+                result.append(', %s' % self.quote_name_unless_alias(alias))
+        return result, params
     def compile(self, node, *args, **kwargs):
         node = self._as_microsoft(node)
         return super().compile(node, *args, **kwargs)
@@ -412,12 +458,17 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
             columns = [f.column for f in fields]
             if auto_field_column in columns:
                 id_insert_sql = []
-                table = qn(opts.db_table)
+                settings_dict = self.connection.settings_dict
+                if '.[' in opts.db_table:
+                    table = qn(opts.db_table)
+                    pass
+                else:
+                    schemas = settings_dict['SCHEMAS']
+                    table= schemas + "].[" + qn(opts.db_table)
                 sql_format = 'SET IDENTITY_INSERT %s ON; %s; SET IDENTITY_INSERT %s OFF'
                 for q, p in sql:
                     id_insert_sql.append((sql_format % (table, q, table), p))
                 sql = id_insert_sql
-
         return sql
 
     def as_sql(self):
@@ -425,7 +476,14 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
         # going to be column names (so we can avoid the extra overhead).
         qn = self.connection.ops.quote_name
         opts = self.query.get_meta()
-        result = ['INSERT INTO %s' % qn(opts.db_table)]
+        settings_dict = self.connection.settings_dict
+        if '.[' in opts.db_table:
+            table = qn(opts.db_table)
+            pass
+        else:
+            schemas = settings_dict['SCHEMAS']
+            table= "[" + schemas + "]." + qn(opts.db_table)
+        result = ['INSERT INTO %s' % table]
         fields = self.query.fields or [opts.pk]
 
         if self.query.fields:
@@ -467,7 +525,6 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
 
         if self.query.fields:
             sql = self.fix_auto(sql, opts, fields, qn)
-
         return sql
 
 
@@ -481,11 +538,74 @@ class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
 
 class SQLUpdateCompiler(compiler.SQLUpdateCompiler, SQLCompiler):
     def as_sql(self):
-        sql, params = super().as_sql()
-        if sql:
-            sql = '; '.join(['SET NOCOUNT OFF', sql])
-        return sql, params
+        """
+        Create the SQL for this query. Return the SQL string and list of
+        parameters.
+        """
+        self.pre_sql_setup()
+        if not self.query.values:
+            return '', ()
+        qn = self.quote_name_unless_alias
+        values, update_params = [], []
+        for field, model, val in self.query.values:
+            if hasattr(val, 'resolve_expression'):
+                val = val.resolve_expression(self.query, allow_joins=False, for_save=True)
+                if val.contains_aggregate:
+                    raise FieldError(
+                        'Aggregate functions are not allowed in this query '
+                        '(%s=%r).' % (field.name, val)
+                    )
+                if val.contains_over_clause:
+                    raise FieldError(
+                        'Window expressions are not allowed in this query '
+                        '(%s=%r).' % (field.name, val)
+                    )
+            elif hasattr(val, 'prepare_database_save'):
+                if field.remote_field:
+                    val = field.get_db_prep_save(
+                        val.prepare_database_save(field),
+                        connection=self.connection,
+                    )
+                else:
+                    raise TypeError(
+                        "Tried to update field %s with a model instance, %r. "
+                        "Use a value compatible with %s."
+                        % (field, val, field.__class__.__name__)
+                    )
+            else:
+                val = field.get_db_prep_save(val, connection=self.connection)
 
+            # Getting the placeholder for the field.
+            if hasattr(field, 'get_placeholder'):
+                placeholder = field.get_placeholder(val, self, self.connection)
+            else:
+                placeholder = '%s'
+            name = field.column
+            if hasattr(val, 'as_sql'):
+                sql, params = self.compile(val)
+                values.append('%s = %s' % (qn(name), placeholder % sql))
+                update_params.extend(params)
+            elif val is not None:
+                values.append('%s = %s' % (qn(name), placeholder))
+                update_params.append(val)
+            else:
+                values.append('%s = NULL' % qn(name))
+        settings_dict = self.connection.settings_dict
+        if '.[' in self.query.base_table:
+            table = self.query.base_table
+            pass
+        else:
+            schemas = settings_dict['SCHEMAS']
+            table= schemas + "].[" + self.query.base_table
+        #table = self.query.base_table
+        result = [
+            'UPDATE %s SET' % qn(table),
+            ', '.join(values),
+        ]
+        where, params = self.compile(self.query.where)
+        if where:
+            result.append('WHERE %s' % where)
+        return ' '.join(result), tuple(update_params + params)
 
 class SQLAggregateCompiler(compiler.SQLAggregateCompiler, SQLCompiler):
     pass
