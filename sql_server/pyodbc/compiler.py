@@ -529,11 +529,50 @@ class SQLInsertCompiler(compiler.SQLInsertCompiler, SQLCompiler):
 
 
 class SQLDeleteCompiler(compiler.SQLDeleteCompiler, SQLCompiler):
-    def as_sql(self):
-        sql, params = super().as_sql()
-        if sql:
-            sql = '; '.join(['SET NOCOUNT OFF', sql])
-        return sql, params
+	def single_alias(self):
+		# Ensure base table is in aliases.
+		self.query.get_initial_alias()
+		return sum(self.query.alias_refcount[t] > 0 for t in self.query.alias_map) == 1
+
+	def _as_sql(self, query):
+		settings_dict = self.connection.settings_dict
+		if '.[' in query.base_table:
+			table = query.base_table
+			pass
+		else:
+			schemas = settings_dict['SCHEMAS']
+			table= schemas + "].[" + query.base_table
+		result = [
+			'DELETE FROM %s' % self.quote_name_unless_alias(table)
+		]
+		where, params = self.compile(query.where)
+		if where:
+			result.append('WHERE %s' % where)
+		return ' '.join(result), tuple(params)
+
+	def as_sql(self):
+		"""
+		Create the SQL for this query. Return the SQL string and list of
+		parameters.
+		"""
+		if self.single_alias:
+			return self._as_sql(self.query)
+		innerq = self.query.clone()
+		innerq.__class__ = Query
+		innerq.clear_select_clause()
+		pk = self.query.model._meta.pk
+		innerq.select = [
+			pk.get_col(self.query.get_initial_alias())
+		]
+		outerq = Query(self.query.model)
+		outerq.where = self.query.where_class()
+		if not self.connection.features.update_can_self_select:
+			# Force the materialization of the inner query to allow reference
+			# to the target table on MySQL.
+			sql, params = innerq.get_compiler(connection=self.connection).as_sql()
+			innerq = RawSQL('SELECT * FROM (%s) subquery' % sql, params)
+		outerq.add_q(Q(pk__in=innerq))
+		return self._as_sql(outerq)
 
 
 class SQLUpdateCompiler(compiler.SQLUpdateCompiler, SQLCompiler):
