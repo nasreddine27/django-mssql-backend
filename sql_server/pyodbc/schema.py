@@ -1009,13 +1009,16 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             tableForName = model._meta.db_table.split('.[')[1]
         else:
             tableForName = model._meta.db_table
+        if '.[' in field.target_field.model._meta.db_table:
+            to_db_table = field.target_field.model._meta.db_table.split('.[')[1]
+        else:
+            to_db_table = field.target_field.model._meta.db_table
         def create_fk_name(*args, **kwargs):
             return self.quote_name(self._create_index_name(*args, **kwargs))
-
         return ForeignKeyName(
             tableForName,
             [field.column],
-            split_identifier(field.target_field.model._meta.db_table)[1],
+            to_db_table,
             [field.target_field.column],
             suffix,
             create_fk_name,
