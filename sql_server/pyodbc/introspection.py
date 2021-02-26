@@ -1,15 +1,12 @@
 import pyodbc as Database
-from collections import namedtuple
 
 from django.db.backends.base.introspection import (
-    BaseDatabaseIntrospection, TableInfo,
+    BaseDatabaseIntrospection, FieldInfo, TableInfo,
 )
 from django.db.models.indexes import Index
-
+from django.db.backends.base.client import BaseDatabaseClient
 SQL_AUTOFIELD = -777555
 SQL_BIGAUTOFIELD = -777444
-
-FieldInfo = namedtuple('FieldInfo', 'name type_code display_size internal_size precision scale null_ok default')
 
 
 class DatabaseIntrospection(BaseDatabaseIntrospection):
@@ -62,7 +59,9 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         """
         Returns a list of table and view names in the current database.
         """
-        sql = 'SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = SCHEMA_NAME()'
+        settings_dict = self.connection.settings_dict
+        schemas = settings_dict['SCHEMAS']
+        sql = "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '" + schemas + "'"
         cursor.execute(sql)
         types = {'BASE TABLE': 't', 'VIEW': 'v'}
         return [TableInfo(row[0], types.get(row[1]))
